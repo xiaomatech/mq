@@ -1,0 +1,236 @@
+Kafka Broker个数
+
+决定Kafka集群大小的因素有以下几点：
+磁盘容量：首先考虑的是所需保存的消息所占用的总磁盘容量和每个broker所能提供的磁盘空间。如果Kafka集群需要保留 10 TB数据，单个broker能存储 2 TB，那么我们需要的最小Kafka集群大小 5 个broker。此外，如果启用副本参数，则对应的存储空间需至少增加一倍（取决于副本参数）。这意味着对应的Kafka集群至少需要 10 个broker。
+请求量：另外一个要考虑的是Kafka集群处理请求的能力。这主要取决于对Kafka client请求的网络处理能力，特别是，有多个consumer或者网路流量不稳定。如果，高峰时刻，单个broker的网络流量达到80%，这时是撑不住两个consumer的，除非有两个broker。再者，如果启用了副本参数，则需要考虑副本这个额外的consumer。也可以扩展多个broker来减少磁盘的吞吐量和系统内存。
+
+
+Kafka Broker配置
+
+同一个Kafka集群的所有broker机器必须满足以下两个参数：
+所有broker机器需配置相同的zookeeper连接参数（.connect）。这决定了Kafka集群存储的元数据位置；
+所有broker机器需配置唯一的broker id（ .id）。如果一个集群下的两个broker配置了相同的broker id，则第二个broker启动时会失败并报错。
+
+Kafka基础概念
+
+Kafka中包含以下基础概念 
+1. Topic(话题)：Kafka中用于区分不同类别信息的类别名称。由producer指定 
+2. Producer(生产者)：将消息发布到Kafka特定的Topic的对象(过程) 
+3. Consumers(消费者)：订阅并处理特定的Topic中的消息的对象(过程) 
+4. Broker(Kafka服务集群)：已发布的消息保存在一组服务器中，称之为Kafka集群。集群中的每一个服务器都是一个代理(Broker). 消费者可以订阅一个或多个话题，并从Broker拉数据，从而消费这些已发布的消息。 
+5. Partition(分区)：Topic物理上的分组，一个topic可以分为多个partition，每个partition是一个有序的队列。partition中的每条消息都会被分配一个有序的id（offset） 
+6. Message：消息，是通信的基本单位，每个producer可以向一个topic（主题）发布一些消息。
+
+消息
+
+消息由一个固定大小的报头和可变长度但不透明的字节阵列负载。报头包含格式版本和CRC32效验和以检测损坏或截断
+
+消息格式
+
+1. 4 byte CRC32 of the message
+2. 1 byte "magic" identifier to allow format changes, value is 0 or 1
+3. 1 byte "attributes" identifier to allow annotations on the message independent of the version
+   bit 0 ~ 2 : Compression codec
+       0 : no compression
+       1 : gzip
+       2 : snappy
+       3 : lz4
+   bit 3 : Timestamp type
+       0 : create time
+       1 : log append time
+   bit 4 ~ 7 : reserved
+4. (可选) 8 byte timestamp only if "magic" identifier is greater than 0
+5. 4 byte key length, containing length K
+6. K byte key
+7. 4 byte payload length, containing length V
+8. V byte payload
+
+Log(日志)
+
+日志是一个只能增加的，完全按照时间排序的一系列记录。我们可以给日志的末尾添加记录，并且可以从左到右读取日志记录。每一条记录都指定了一个唯一的有一定顺序的日志记录编号。详细见首席工程师揭秘LinkedIn大数据后台
+每个日志文件都是“log entries”序列，每一个log entry包含一个4字节整型数（值为N），其后跟N个字节的消息体。每条消息都有一个当前partition下唯一的64字节的offset，它指明了这条消息的起始位置
+这个“log entries”并非由一个文件构成，而是分成多个segment，每个segment名为该segment第一条消息的offset和“.kafka”组成。另外会有一个索引文件，它标明了每个segment下包含的log entry的offset范围。 
+这里写图片描述
+Topic & Partition
+
+为了使得Kafka的吞吐率可以水平扩展，物理上把topic分成一个或多个partition，每个partition在物理上对应一个文件夹，该文件夹下存储这个partition的所有消息和索引文件。
+每一个分区都是一个顺序的、不可变的消息队列， 并且可以持续的添加。分区中的消息都被分配了一个序列号，称之为偏移量(64字节的offset),在每个分区中此偏移量都是唯一的
+因为每条消息都被append到该partition中，是顺序写磁盘，因此效率非常高（经验证，顺序写磁盘效率比随机写内存还要高，这是Kafka高吞吐率的一个很重要的保证）
+每一条消息被发送到broker时，会根据paritition规则选择被存储到哪一个partition。如果partition规则设置的合理，所有消息可以均匀分布到不同的partition里，这样就实现了水平扩展。（如果一个topic对应一个文件，那这个文件所在的机器I/O将会成为这个topic的性能瓶颈，而partition解决了这个问题）。在创建topic时可以在$KAFKA_HOME/config/server.properties中指定这个partition的数量(如下所示)，当然也可以在topic创建之后去修改parition数量
+在发送一条消息时，可以指定这条消息的key，producer根据这个key和partition机制来判断将这条消息发送到哪个parition。paritition机制可以通过指定producer的paritition. class这一参数来指定，该class必须实现kafka.producer.Partitioner接口。本例中如果key可以被解析为整数则将对应的整数与partition总数取余，该消息会被发送到该数对应的partition。（每个parition都会有个序号）
+key相同的消息会被发送并存储到同一个partition里，而且key的序号正好和partition序号相同。（partition序号从0开始，本例中的key也正好从0开始）
+offset
+
+在每个分区中此偏移量都是唯一的
+消费者所持有的仅有的元数据就是这个偏移量，也就是消费者在这个log中的位置。 这个偏移量由消费者控制。
+正常情况当消费者消费消息的时候，偏移量也线性的的增加。但是实际偏移量由消费者控制，消费者可以将偏移量重置为更老的一个偏移量，重新读取消息。
+一个消费者的操作不会影响其它消费者对此log的处理
+
+
+定义、特点、应用场景
+
+Kafka是什么
+
+Kafka最先由LinkedIn公司开发，之后成为Apache的顶级项目。
+Kafka是一个分布式的、分区化、可复制提交的日志服务
+LinkedIn使用Kafka实现了公司不同应用程序之间的松耦和，那么作为一个可扩展、高可靠的消息系统
+Kafaka的特点
+
+Kafaka是分布式的，其所有的构件borker(服务端集群)、producer(消息生产)、consumer(消息消费者)都可以是分布式的。
+在消息的生产时可以使用一个标识topic来区分，且可以进行分区；每一个分区都是一个顺序的、不可变的消息队列， 并且可以持续的添加。
+同时为发布和订阅提供高吞吐量。据了解，Kafka每秒可以生产约25万消息（50 MB），每秒处理55万消息（110 MB）。
+消息被处理的状态是在consumer端维护，而不是由server端维护。当失败时能自动平衡
+常用的场景
+
+监控：主机通过Kafka发送与系统和应用程序健康相关的指标，然后这些信息会被收集和处理从而创建监控仪表盘并发送警告。
+消息队列： 应用程度使用Kafka作为传统的消息系统实现标准的队列和消息的发布—订阅，例如搜索和内容提要（Content Feed）。比起大多数的消息系统来说，Kafka有更好的吞吐量，内置的分区，冗余及容错性，这让Kafka成为了一个很好的大规模消息处理应用的解决方案。消息系统 一般吞吐量相对较低，但是需要更小的端到端延时，并尝尝依赖于Kafka提供的强大的持久性保障。在这个领域，Kafka足以媲美传统消息系统，如ActiveMR或RabbitMQ
+站点的用户活动追踪: 为了更好地理解用户行为，改善用户体验，将用户查看了哪个页面、点击了哪些内容等信息发送到每个数据中心的Kafka集群上，并通过Hadoop进行分析、生成日常报告。
+流处理：保存收集流数据，以提供之后对接的Storm或其他流式计算框架进行处理。很多用户会将那些从原始topic来的数据进行 阶段性处理，汇总，扩充或者以其他的方式转换到新的topic下再继续后面的处理。例如一个文章推荐的处理流程，可能是先从RSS数据源中抓取文章的内 容，然后将其丢入一个叫做“文章”的topic中；后续操作可能是需要对这个内容进行清理，比如回复正常数据或者删除重复数据，最后再将内容匹配的结果返 还给用户。这就在一个独立的topic之外，产生了一系列的实时数据处理的流程。
+日志聚合。使用Kafka代替日志聚合（log aggregation）。日志聚合一般来说是从服务器上收集日志文件，然后放到一个集中的位置（文件服务器或HDFS）进行处理。然而Kafka忽略掉 文件的细节，将其更清晰地抽象成一个个日志或事件的消息流。这就让Kafka处理过程延迟更低，更容易支持多数据源和分布式数据处理。比起以日志为中心的 系统比如Scribe或者Flume来说，Kafka提供同样高效的性能和因为复制导致的更高的耐用性保证，以及更低的端到端延迟
+持久性日志：Kafka可以为一种外部的持久性日志的分布式系统提供服务。这种日志可以在节点间备份数据，并为故障节点数据回复提供一种重新同步的机制。Kafka中日志压缩功能为这种用法提供了条件。在这种用法中，Kafka类似于Apache BookKeeper项目。
+
+
+Kafka日志本身是由多个日志段组成(log segment)。一个日志是一个FileMessageSet，它包含了日志数据以及OffsetIndex对象，该对象使用位移来读取日志数据
+
+
+
+官方对于consumer与partition的建议
+
+1. 如果consumer比partition多，是浪费，因为kafka的设计是在一个partition上是不允许并发的，所以consumer数不要大于partition数
+2. 如果consumer比partition少，一个consumer会对应于多个partitions，这里主要合理分配consumer数和partition数，否则会导致partition里面的数据被取的不均匀。最好partiton数目是consumer数目的整数倍，所以partition数目很重要，比如取24，就很容易设定consumer数目
+3. 如果consumer从多个partition读到数据，不保证数据间的顺序性，kafka只保证在一个partition上数据是有序的，但多个partition，根据你读的顺序会有不同
+4. 增减consumer，broker，partition会导致rebalance，所以rebalance后consumer对应的partition会发生变化
+5. High-level接口中获取不到数据的时候是会block的
+
+
+集群的扩容
+
+
+第一步 配置新得broker
+
+将现有的集群上任一个服务器上的kafka目录拷贝到新的服务器上
+修改config/server.properties中的broker.id、log.dirs、listeners
+创建logs.dirs指定的目录，并设定读写权限(chomd -R 777 XXX)
+broker.id=3
+log.dirs=kafka-logs
+listeners=PLAINTEXT://172.16.49.174:9092
+
+第二步 启动新的broker
+
+bin/kafka-server-start.sh config/server.properties  &
+
+第三步 迁移指定topic的数据到新的broker
+
+虽然经过上面两个步骤后已经完成了集群的扩容；但是集群上原有的topic的数据不会自动迁移到新的broker上。可以在新的broker所在的服务器上通过 ls /home/lxh/kafka_2.11-0.10.0.0/kafka-logs 查看到并没有一原有的topic名称的文件目录（因为创建topic后会在config/server.properties中的配置的log.dirs 目录中生产以topic名称+分区编号的文件目录）；那么就需要手动的区迁移数据
+(一)、生成迁移分配规则json文件
+
+创建编辑要迁移的topic的 json文件
+
+vi topic-to-move.json
+比如要将topic名称为test和paritioer_test的数据重新平衡到集群中，就可以新增以下内容
+
+{"topics": [{"topic": "test"},
+            {"topic": "paritioer_test"}],
+ "version":1
+}
+
+生成迁移分配规则json文件
+
+bin/kafka-reassign-partitions.sh --zookeeper localhost:2181 --topics-to-move-json-file topic-to-move.json --broker-list "0,1,2" --generate
+
+得到的结果为
+
+Current partition replica assignment
+
+{"version":1,"partitions":[{"topic":"test","partition":4,"replicas":[0,1]},{"topic":"test","partition":1,"replicas":[1,0]},{"topic":"paritioer_test","partition":0,"replicas":[0]},{"topic":"test","partition":2,"replicas":[0,1]},{"topic":"test","partition":0,"replicas":[0,1]},{"topic":"test","partition":3,"replicas":[1,0]}]}
+Proposed partition reassignment configuration
+
+{"version":1,"partitions":[{"topic":"test","partition":4,"replicas":[1,0]},{"topic":"test","partition":1,"replicas":[1,2]},{"topic":"test","partition":2,"replicas":[2,0]},{"topic":"paritioer_test","partition":0,"replicas":[0]},{"topic":"test","partition":0,"replicas":[0,1]},{"topic":"test","partition":3,"replicas":[0,2]}]}
+
+其中的Current partition replica assignment指的是迁移前的partition replica；Proposed partition reassignment configuration 指的就是迁移分配规则json。需要将该json文件保存到json文件中(如expand-cluster-reassignment.json)
+(二)、执行迁移分配
+
+bin/kafka-reassign-partitions.sh --zookeeper localhost:2181 --reassignment-json-file expand-cluster-reassignment.json --execute
+这里写图片描述
+
+注意：在迁移过程中不能人为的结束或停止kafka服务，不然会有数据不一致的问题
+(三)、验证分配
+
+在执行的过程中，可以新开一个终端执行以下命令来查看执行是否正确完成
+bin/kafka-reassign-partitions.sh --zookeeper localhost:2181 --reassignment-json-file expand-cluster-reassignment.json --verify
+输出
+
+Status of partition reassignment:
+Reassignment of partition [test,4] completed successfully
+Reassignment of partition [test,0] completed successfully
+Reassignment of partition [paritioer_test,0] completed successfully
+Reassignment of partition [test,3] completed successfully
+Reassignment of partition [test,2] completed successfully
+Reassignment of partition [test,1] completed successfully
+
+在迁移完成过程后，可以使用以下命令看下topic的每个partitions的分布情况
+
+bin/kafka-topics.sh --zookeeper 172.16.49.173:2181 --describe --topic test
+
+Topic:test  PartitionCount:5    ReplicationFactor:2 Configs:
+    Topic: test Partition: 0    Leader: 0   Replicas: 0,1   Isr: 0,1
+    Topic: test Partition: 1    Leader: 1   Replicas: 1,2   Isr: 1,2
+    Topic: test Partition: 2    Leader: 2   Replicas: 2,0   Isr: 0,2
+    Topic: test Partition: 3    Leader: 0   Replicas: 0,2   Isr: 0,2
+    Topic: test Partition: 4    Leader: 0   Replicas: 1,0   Isr: 0,1
+
+可以看到名为test的topic的有的数据以及存在于编号为2的新broker上了
+
+
+
+topic管理
+
+一、创建topic
+
+使用命令行手动或者向一个不存在的topic发送(生产)消息时都会新创建一个topic
+向一个不存在的topic发送(生产)消息时新创建的topic时，其采用为默认的topic-config配置以及server.properties中的topic的配置。
+
+使用命令行手动创建一个topic可以使用 –config 选项配合topic-config配置中的信息来覆盖默认配置或者使用–delete-config来恢复默认配置。
+(一)、示例
+
+bin/kafka-topics.sh --zookeeper localhost:2181 --create --topic my-topic --partitions 1 --replication-factor 2 --config max.message.bytes=64000 --config flush.messages=1
+(一)、主要参数说明
+
+1. partitions分区数
+
+(1). partitions ：分区数，控制topic将分片成多少个log。可以显示指定，如果不指定则会使用broker(server.properties)中的num.partitions配置的数量
+(2). 虽然增加分区数可以提供kafka集群的吞吐量、但是过多的分区数或者或是单台服务器上的分区数过多，会增加不可用及延迟的风险。因为多的分区数，意味着需要打开更多的文件句柄、增加点到点的延时、增加客户端的内存消耗。
+(3). 分区数也限制了consumer的并行度，即限制了并行consumer消息的线程数不能大于分区数
+(4). 分区数也限制了producer发送消息是指定的分区。如创建topic时分区设置为1，producer发送消息时通过自定义的分区方法指定分区为2或以上的数都会出错的；这种情况可以通过alter –partitions 来增加分区数。
+2. replication-factor副本
+
+1 . replication factor 控制消息保存在几个broker(服务器)上，一般情况下等于broker的个数。
+2. 如果没有在创建时显示指定或通过API向一个不存在的topic生产消息时会使用broker(server.properties)中的default.replication.factor配置的数量
+(二)、查看topic属性
+
+bin/kafka-topics.sh --zookeeper zk1:2181 --describe --topic topicname
+
+这里写图片描述
+
+结果说明:
+
+第一行，列出了topic的名称，分区数(PartitionCount),副本数(ReplicationFactor)以及其他的配置(Config.s)
+Leader:1 表示为做为读写的broker的编号
+Replicas:表示该topic的每个分区在那些borker中保存
+Isr:表示当前有效的broker, Isr是Replicas的子集
+(三)、修改topic
+
+增加分区数
+bin/kafka-topics.sh --zookeeper zk_host:port --alter --topic my_topic_name--partitions 40
+
+增加配置
+bin/kafka-topics.sh --zookeeper zk_host:port --alter --topic my_topic_name --config flush.messages=1
+
+删除配置
+bin/kafka-topics.sh --zookeeper zk_host:port --alter --topic my_topic_name --delete-config flush.messages=1
+(四)、删除topic
+
+目前删除操作在默认情况下只是打上一个删除的标记，在重新启动kafka 后才删除。如果需要立即删除，则需要在server.properties中配置
+delete.topic.enable=true
+
+bin/kafka-topics.sh --zookeeper zk_host:port --delete --topic my_topic_name
